@@ -61,6 +61,10 @@ static void cb(ConstFSEventStreamRef streamRef, void *clientCallBackInfo, size_t
 		}
 	}
 	
+	if (interestings.count == 0) {
+		return;
+	}
+	
 	struct options *opts = clientCallBackInfo;
 	
 	if (opts->command) {
