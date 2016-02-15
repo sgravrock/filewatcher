@@ -2,15 +2,18 @@
 
 struct options {
 	BOOL json;
+	char * const *command;
 };
 
-static struct options parseArgs(const char *argv[]);
+static struct options parseArgs(char * const argv[]);
 static void cb(ConstFSEventStreamRef streamRef, void *clientCallBackInfo, size_t numEvents, void *eventPaths, const FSEventStreamEventFlags eventFlags[], const FSEventStreamEventId eventIds[]);
 static BOOL isInteresting(FSEventStreamEventFlags flags);
+static void doCommand(char * const *command);
+static void waitFor(pid_t pid, int pipefd, const char *commandName);
 static void writePaths(NSArray *paths);
 static void writeJson(NSArray *paths);
 
-int main(int argc, const char * argv[]) {
+int main(int argc, char * argv[]) {
 	@autoreleasepool {
 		struct options opts = parseArgs(argv);
 		struct FSEventStreamContext context = { 0, &opts, NULL, NULL, NULL };
@@ -25,14 +28,21 @@ int main(int argc, const char * argv[]) {
 	return EXIT_FAILURE; // can't happen
 }
 
-static struct options parseArgs(const char *argv[]) {
-	struct options opts = { NO };
+static struct options parseArgs(char * const argv[]) {
+	struct options opts = { NO, NULL };
 	
-	for (int i = 1; argv[i] != NULL; i++) {
-		if (strcmp(argv[i], "--json") == 0) {
+	if (argv[1]) {
+		if (strcmp(argv[1], "--json") == 0) {
 			opts.json = YES;
+		} else if (strcmp(argv[1], "--do") == 0) {
+			if (!argv[2]) {
+				fprintf(stderr, "--do requires a command\n");
+				exit(EXIT_FAILURE);
+			}
+			
+			opts.command = argv + 2;
 		} else {
-			fprintf(stderr, "Usage: %s [--json]\n", argv[0]);
+			fprintf(stderr, "Usage: %s [--json | --do command [arg1...]]\n", argv[0]);
 			exit(EXIT_FAILURE);
 		}
 	}
@@ -51,8 +61,11 @@ static void cb(ConstFSEventStreamRef streamRef, void *clientCallBackInfo, size_t
 		}
 	}
 	
+	struct options *opts = clientCallBackInfo;
 	
-	if (((struct options *)clientCallBackInfo)->json) {
+	if (opts->command) {
+		doCommand(opts->command);
+	} else if (opts->json) {
 		writeJson(interestings);
 	} else {
 		writePaths(interestings);
@@ -69,6 +82,48 @@ static BOOL isInteresting(FSEventStreamEventFlags flags) {
 	}
 	
 	return NO;
+}
+
+static void doCommand(char * const *command) {
+	int pipefds[2];
+	
+	if (pipe(pipefds) < 0) {
+		perror("pipe");
+		return;
+	}
+	
+	pid_t pid = fork();
+	
+	if (pid < 0) {
+		perror("fork");
+	} else if (pid > 0) {
+		close(pipefds[1]);
+		waitFor(pid, pipefds[0], command[0]);
+	} else {
+		execvp(command[0], command);
+		// Can't use stdio after fork, so ask the parent process to report the error
+		write(pipefds[1], &errno, sizeof errno);
+		_exit(255);
+	}
+}
+
+static void waitFor(pid_t pid, int pipefd, const char *commandName) {
+	int status;
+	
+	if (waitpid(pid, &status, 0) < 0) {
+		perror("Can't wait for child process");
+		return;
+	}
+	
+	if (WIFEXITED(status) && WEXITSTATUS(status) == 255) {
+		int childErrno;
+		
+		if (read(pipefd, &childErrno, sizeof childErrno) < 0) {
+			perror("Error figuring out why your command failed");
+		} else {
+			fprintf(stderr, "%s: %s\n", commandName, strerror(childErrno));
+		}
+	}
 }
 
 static void writePaths(NSArray *paths) {
